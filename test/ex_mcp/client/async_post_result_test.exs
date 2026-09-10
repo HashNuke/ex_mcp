@@ -9,6 +9,8 @@ defmodule ExMCP.Client.AsyncPostResultTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias ExMCP.Client
   alias ExMCP.Transport.HTTP
 
@@ -156,6 +158,32 @@ defmodule ExMCP.Client.AsyncPostResultTest do
 
       assert_receive {^reply_tag, {:error, {:transport_error, :econnrefused}}}
       assert new_state.pending_requests == %{}
+    end
+
+    test "error logs summarize nested transport data without rendering it" do
+      secret = "private-response-#{System.unique_integer([:positive])}"
+      task_ref = make_ref()
+      reply_tag = make_ref()
+
+      state =
+        client_state(
+          pending_requests: %{42 => {{self(), reply_tag}, :single}},
+          async_post_tasks: %{task_ref => 42}
+        )
+
+      meta = %{request_id: 42, state_changes: %{}}
+
+      log =
+        capture_log(fn ->
+          assert {:noreply, _new_state} =
+                   Client.handle_info(
+                     {:async_post_result, {:error, {:json_decode_error, secret}}, meta},
+                     state
+                   )
+        end)
+
+      refute log =~ secret
+      assert log =~ "tuple(size=2)"
     end
 
     test "legacy 2-tuple result shape is still accepted" do
