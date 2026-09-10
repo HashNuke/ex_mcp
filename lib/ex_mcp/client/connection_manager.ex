@@ -9,7 +9,7 @@ defmodule ExMCP.Client.ConnectionManager do
   require Logger
   # alias ExMCP.TransportManager  # Not using full manager for now
   alias ExMCP.Client.{EraCache, EraProbe}
-  alias ExMCP.Internal.{Protocol, VersionInfo, VersionRegistry}
+  alias ExMCP.Internal.{LogSummary, Protocol, VersionInfo, VersionRegistry}
   alias ExMCP.Reliability.Retry
   alias ExMCP.Transport.{HTTP, Local, ReliabilityWrapper, Stdio, Test}
   alias ExMCP.Transport.HTTP.LegacySSE
@@ -346,7 +346,7 @@ defmodule ExMCP.Client.ConnectionManager do
         receive_loop(parent, transport_mod, transport_state)
 
       {:error, reason} ->
-        Logger.error("Transport error in receive loop: #{inspect(reason)}")
+        Logger.error("Transport error in receive loop: #{LogSummary.describe(reason)}")
         send(parent, {:transport_closed, reason})
         :ok
     end
@@ -648,7 +648,7 @@ defmodule ExMCP.Client.ConnectionManager do
         {:ok, result, transport_state}
 
       {:error, error_details, _id} ->
-        Logger.debug("Handshake error details: #{inspect(error_details)}")
+        Logger.debug("Handshake error details: #{LogSummary.describe(error_details)}")
 
         # Extract error code for cleaner error reporting
         error_code = error_details["code"]

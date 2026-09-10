@@ -30,6 +30,8 @@ defmodule ExMCP.Client.DefaultHandler do
 
   require Logger
 
+  alias ExMCP.Internal.LogSummary
+
   @impl true
   def init(opts) do
     state = %{
@@ -113,7 +115,7 @@ defmodule ExMCP.Client.DefaultHandler do
     end
   rescue
     error ->
-      Logger.error("Error in handle_create_message: #{inspect(error)}")
+      Logger.error("Error in handle_create_message: #{LogSummary.describe(error)}")
 
       {:error,
        %{

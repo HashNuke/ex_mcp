@@ -3,6 +3,7 @@ defmodule ExMCP.Transport.HTTP.ToolHeaders do
 
   require Logger
 
+  alias ExMCP.Internal.LogSummary
   alias ExMCP.Transport.HTTP.RequestHeaders
 
   @type annotation :: %{header: String.t(), path: [String.t()], type: String.t()}
@@ -33,7 +34,8 @@ defmodule ExMCP.Transport.HTTP.ToolHeaders do
         {:error, reason} ->
           Logger.warning(
             "Excluding tool with invalid x-mcp-header annotation: " <>
-              "tool=#{inspect(tool_name(tool))} reason=#{inspect(reason)}"
+              "tool_hash=#{LogSummary.fingerprint(tool_name(tool))} " <>
+              "reason=#{LogSummary.describe(reason)}"
           )
 
           false

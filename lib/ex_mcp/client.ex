@@ -39,7 +39,16 @@ defmodule ExMCP.Client do
 
   alias ExMCP.Client.{ConnectionManager, EraCache, MRTR, RequestHandler, Subscription}
   alias ExMCP.Client.Operations.{Prompts, Resources, Tasks, Tools}
-  alias ExMCP.Internal.{Headers, Protocol, RequestParams, VersionInfo, VersionRegistry}
+
+  alias ExMCP.Internal.{
+    Headers,
+    LogSummary,
+    Protocol,
+    RequestParams,
+    VersionInfo,
+    VersionRegistry
+  }
+
   alias ExMCP.Reliability.Retry
   alias ExMCP.Response
   alias ExMCP.Server.Discover
@@ -937,7 +946,7 @@ defmodule ExMCP.Client do
 
   # Handle connection errors with proper normalization
   defp handle_connection_error(reason) do
-    Logger.error("Failed to initialize MCP client: #{inspect(reason)}")
+    Logger.error("Failed to initialize MCP client: #{LogSummary.describe(reason)}")
     {:stop, normalize_connection_error(reason)}
   end
 
@@ -1474,7 +1483,7 @@ defmodule ExMCP.Client do
     if reason == :normal do
       {:noreply, state}
     else
-      Logger.error("Async POST task exited: #{inspect(reason)}")
+      Logger.error("Async POST task exited: #{LogSummary.describe(reason)}")
       {:noreply, fail_async_post_request(state, request_id, reason)}
     end
   end
@@ -1520,7 +1529,7 @@ defmodule ExMCP.Client do
 
   # Push model: transport error
   def handle_info({:transport_error, reason}, state) do
-    Logger.warning("Transport error (push): #{inspect(reason)}")
+    Logger.warning("Transport error (push): #{LogSummary.describe(reason)}")
     {:noreply, state}
   end
 
@@ -1552,19 +1561,19 @@ defmodule ExMCP.Client do
 
   def handle_info({:EXIT, pid, reason}, %{receiver_task: %Task{pid: task_pid}} = state)
       when pid == task_pid do
-    Logger.error("Receiver task died: #{inspect(reason)}")
+    Logger.error("Receiver task died: #{LogSummary.describe(reason)}")
     {:noreply, handle_transport_down({:receiver_task_died, reason}, state)}
   end
 
   # Push mode: forwarder process died
   def handle_info({:EXIT, _pid, reason}, %{receiver_task: :push} = state)
       when reason != :normal do
-    Logger.error("Transport forwarder died: #{inspect(reason)}")
+    Logger.error("Transport forwarder died: #{LogSummary.describe(reason)}")
     {:noreply, handle_transport_down({:transport_forwarder_died, reason}, state)}
   end
 
   def handle_info({:transport_closed, reason}, state) do
-    Logger.error("Transport closed: #{inspect(reason)}")
+    Logger.error("Transport closed: #{LogSummary.describe(reason)}")
     {:noreply, handle_transport_down(reason, state)}
   end
 
@@ -1594,7 +1603,7 @@ defmodule ExMCP.Client do
   end
 
   defp handle_async_post_result({:error, reason}, request_id, state) do
-    Logger.error("Async POST failed: #{inspect(reason)}")
+    Logger.error("Async POST failed: #{LogSummary.describe(reason)}")
     {:noreply, fail_async_post_request(state, request_id, reason)}
   end
 
@@ -1996,7 +2005,7 @@ defmodule ExMCP.Client do
 
       Logger.error(
         "Giving up on reconnection after #{state.reconnect_attempts} attempts: " <>
-          inspect(reason)
+          LogSummary.describe(reason)
       )
 
       %{state | connection_status: :disconnected}
@@ -2070,7 +2079,7 @@ defmodule ExMCP.Client do
         %{new_state | health_check_id: request_id}
 
       {:error, reason} ->
-        Logger.debug("MCP health check ping could not be sent: #{inspect(reason)}")
+        Logger.debug("MCP health check ping could not be sent: #{LogSummary.describe(reason)}")
         %{state | health_check_id: nil}
     end
   end
