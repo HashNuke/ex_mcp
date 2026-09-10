@@ -149,6 +149,36 @@ defmodule ExMCP.Transport.HTTP.ModernStreamClientTest do
     refute_receive {:modern_http_stream_message, ^pid, @request_id, ^second}, 100
   end
 
+  test "complete SSE events share one cumulative response budget" do
+    bypass = Bypass.open()
+
+    first = %{
+      "jsonrpc" => "2.0",
+      "method" => "notifications/progress",
+      "params" => %{"progressToken" => "job", "progress" => 1}
+    }
+
+    second = put_in(first, ["params", "progress"], 2)
+    first_data = Jason.encode!(first)
+    second_data = Jason.encode!(second)
+    body = "data: #{first_data}\n\ndata: #{second_data}\n\n"
+
+    Bypass.expect_once(bypass, "POST", "/mcp", fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("text/event-stream")
+      |> Plug.Conn.resp(200, body)
+    end)
+
+    limit = byte_size(first_data) + byte_size(second_data) - 1
+    assert {:ok, pid} = start_stream(bypass, max_response_bytes: limit)
+
+    assert_receive {:modern_http_stream_message, ^pid, @request_id, ^first}, 5_000
+    send(pid, {:modern_http_stream_ack, self(), @request_id})
+
+    assert_receive {:modern_http_stream_closed, ^pid, @request_id, :response_too_large}, 500
+    refute_receive {:modern_http_stream_message, ^pid, @request_id, ^second}, 100
+  end
+
   defp validate(kind, message) do
     ModernStreamClient.validate_message(message, @request_id, kind)
   end

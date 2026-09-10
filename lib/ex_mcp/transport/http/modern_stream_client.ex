@@ -46,6 +46,7 @@ defmodule ExMCP.Transport.HTTP.ModernStreamClient do
     :auth_provider_state,
     :header_sanitizer,
     :consumer_ack_timeout,
+    response_bytes: 0,
     auth_attempts: 0,
     buffer: "",
     completed?: false,
@@ -131,34 +132,7 @@ defmodule ExMCP.Transport.HTTP.ModernStreamClient do
   def handle_info({:bounded_http, ref, {:stream, chunk}}, %{request_ref: ref} = state) do
     case append_chunk(state.buffer, chunk, state.max_buffer_bytes) do
       {:ok, buffer} ->
-        {events, remaining} = SSE.parse_stream(buffer)
-
-        state =
-          if events != [] or complete_sse_frame?(buffer),
-            do: reset_idle_timer(state),
-            else: state
-
-        state =
-          Enum.reduce_while(events, %{state | buffer: remaining}, fn event, acc ->
-            state = deliver_event(event, acc)
-
-            if state.completed? or state.failed?, do: {:halt, state}, else: {:cont, state}
-          end)
-
-        cond do
-          state.completed? ->
-            cancel_request(state)
-            send(state.parent, {:modern_http_stream_finished, self(), state.request_id})
-            {:stop, :normal, cancel_idle_timer(state)}
-
-          state.failed? ->
-            cancel_request(state)
-            {:stop, :normal, cancel_idle_timer(state)}
-
-          true ->
-            BoundedStream.ack(ref)
-            {:noreply, state}
-        end
+        handle_stream_buffer(ref, buffer, state)
 
       {:error, :stream_buffer_limit_exceeded} ->
         cancel_request(state)
@@ -300,6 +274,64 @@ defmodule ExMCP.Transport.HTTP.ModernStreamClient do
   end
 
   defp deliver_event(_comment_or_empty_event, state), do: state
+
+  defp handle_stream_buffer(ref, buffer, state) do
+    {events, remaining} = SSE.parse_stream(buffer)
+
+    state =
+      if events != [] or complete_sse_frame?(buffer),
+        do: reset_idle_timer(state),
+        else: state
+
+    events
+    |> process_stream_events(%{state | buffer: remaining})
+    |> finish_stream_chunk(ref)
+  end
+
+  defp process_stream_events(events, state) do
+    Enum.reduce_while(events, state, fn event, acc ->
+      state = process_stream_event(event, acc)
+      if state.completed? or state.failed?, do: {:halt, state}, else: {:cont, state}
+    end)
+  end
+
+  defp process_stream_event(event, state) do
+    case reserve_response_bytes(event, state) do
+      {:ok, budgeted} ->
+        deliver_event(event, budgeted)
+
+      {:error, over_limit} ->
+        over_limit
+        |> notify_closed(:response_too_large)
+        |> Map.put(:failed?, true)
+    end
+  end
+
+  defp finish_stream_chunk(%{completed?: true} = state, _ref) do
+    cancel_request(state)
+    send(state.parent, {:modern_http_stream_finished, self(), state.request_id})
+    {:stop, :normal, cancel_idle_timer(state)}
+  end
+
+  defp finish_stream_chunk(%{failed?: true} = state, _ref) do
+    cancel_request(state)
+    {:stop, :normal, cancel_idle_timer(state)}
+  end
+
+  defp finish_stream_chunk(state, ref) do
+    BoundedStream.ack(ref)
+    {:noreply, state}
+  end
+
+  defp reserve_response_bytes(%{"data" => data}, state) when is_binary(data) do
+    response_bytes = state.response_bytes + byte_size(data)
+
+    if response_bytes <= state.max_response_bytes,
+      do: {:ok, %{state | response_bytes: response_bytes}},
+      else: {:error, state}
+  end
+
+  defp reserve_response_bytes(_event, state), do: {:ok, state}
 
   defp handle_stream_message(message, state) do
     case validate_message(message, state.request_id, state.stream_kind) do

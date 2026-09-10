@@ -13,6 +13,7 @@ defmodule ExMCP.Client.ConnectionManager do
   alias ExMCP.Reliability.Retry
   alias ExMCP.Transport.{HTTP, Local, ReliabilityWrapper, Stdio, Test}
   alias ExMCP.Transport.HTTP.LegacySSE
+  alias ExMCP.Transport.StreamMessage
 
   @default_handshake_timeout 10_000
 
@@ -321,6 +322,14 @@ defmodule ExMCP.Client.ConnectionManager do
   """
   def receive_loop(parent, transport_mod, transport_state) do
     case transport_mod.receive_message(transport_state) do
+      {:ok, %StreamMessage{} = message, new_state} ->
+        send(
+          parent,
+          {:transport_message, message.payload, message.response_bytes}
+        )
+
+        receive_loop(parent, transport_mod, new_state)
+
       {:ok, message, new_state} ->
         :telemetry.execute(
           [:ex_mcp, :client, :receiver, :message],
@@ -618,6 +627,9 @@ defmodule ExMCP.Client.ConnectionManager do
       end
 
     case result do
+      {:ok, %StreamMessage{payload: message}, new_state} ->
+        {:ok, message, new_state}
+
       {:ok, message, new_state} ->
         {:ok, message, new_state}
 
