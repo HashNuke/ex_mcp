@@ -282,18 +282,14 @@ defmodule ExMCP.Client.RequestHandler do
          request_id,
          %{transport_mod: ReliabilityWrapper, transport_state: transport_state} = state
        ) do
-    case ReliabilityWrapper.unwrap(transport_state) do
-      {transport_mod, unwrapped_state} ->
-        track_response_budget(
-          budgets,
-          request,
-          request_id,
-          %{state | transport_mod: transport_mod, transport_state: unwrapped_state}
-        )
+    {transport_mod, unwrapped_state} = ReliabilityWrapper.unwrap(transport_state)
 
-      _not_wrapped ->
-        budgets
-    end
+    track_response_budget(
+      budgets,
+      request,
+      request_id,
+      %{state | transport_mod: transport_mod, transport_state: unwrapped_state}
+    )
   end
 
   defp track_response_budget(budgets, _request, _request_id, _state), do: budgets
