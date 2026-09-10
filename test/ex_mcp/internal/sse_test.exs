@@ -86,6 +86,28 @@ defmodule ExMCP.Internal.SSETest do
       assert {[], "partial"} = SSE.parse_stream("partial")
     end
 
+    test "preserves an event across every possible TCP chunk boundary" do
+      event =
+        "event: message\r\nid: evt-1\r\n" <>
+          "data: {\"jsonrpc\":\"2.0\",\"result\":{\"value\":\"private\"}}\r\n\r\n"
+
+      expected = [
+        %{
+          "event" => "message",
+          "id" => "evt-1",
+          "data" => ~s({"jsonrpc":"2.0","result":{"value":"private"}})
+        }
+      ]
+
+      for offset <- 1..(byte_size(event) - 1) do
+        first = binary_part(event, 0, offset)
+        second = binary_part(event, offset, byte_size(event) - offset)
+
+        assert {[], buffered} = SSE.parse_stream(first)
+        assert {^expected, ""} = SSE.parse_stream(buffered <> second)
+      end
+    end
+
     test "ignores comments" do
       assert SSE.parse_stream(": keep-alive\n\n") == {[], ""}
     end
