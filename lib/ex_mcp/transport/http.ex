@@ -708,7 +708,7 @@ defmodule ExMCP.Transport.HTTP do
     }
 
     # Get transport-specific security configuration
-    config = SecurityConfig.get_transport_config(:http)
+    config = SecurityConfig.get_transport_config(:http, client_security_config(state))
 
     case SecurityGuard.validate_request(security_request, config) do
       {:ok, sanitized_request} ->
@@ -821,7 +821,7 @@ defmodule ExMCP.Transport.HTTP do
   end
 
   defp extract_user_id(state) do
-    config = SecurityConfig.get_transport_config(:http)
+    config = SecurityConfig.get_transport_config(:http, client_security_config(state))
 
     case Map.get(config, :user_id_resolver) do
       nil ->
@@ -850,6 +850,9 @@ defmodule ExMCP.Transport.HTTP do
         resolver.(state)
     end
   end
+
+  defp client_security_config(%{security: security}) when is_map(security), do: security
+  defp client_security_config(_state), do: %{}
 
   defp handle_http_response({status_line, headers, body}, state, request_body) do
     # Convert charlist to binary if needed (httpc returns charlists by default)
