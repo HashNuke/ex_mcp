@@ -8,11 +8,22 @@ defmodule ExMCP.Client.ModernResultValidationTest do
       request = Jason.decode!(message)
       send(state.owner, {:outbound_request, request})
 
-      response = %{
-        "jsonrpc" => "2.0",
-        "id" => request["id"],
-        "result" => state.result
-      }
+      response =
+        case Map.get(state, :response_kind, :result) do
+          :result ->
+            %{
+              "jsonrpc" => "2.0",
+              "id" => Map.get(state, :response_id, request["id"]),
+              "result" => state.result
+            }
+
+          :error ->
+            %{
+              "jsonrpc" => "2.0",
+              "id" => Map.get(state, :response_id, request["id"]),
+              "error" => %{"code" => -32_000, "message" => "remote failure"}
+            }
+        end
 
       {:ok, state, Jason.encode!(response)}
     end
@@ -141,6 +152,31 @@ defmodule ExMCP.Client.ModernResultValidationTest do
 
     assert {:reply, {:ok, %{"tools" => []}}, _state} =
              RequestHandler.handle_request("tools/list", %{}, {self(), make_ref()}, state)
+  end
+
+  test "rejects a synchronous result or error for another request id" do
+    for response_kind <- [:result, :error] do
+      state = modern_state(%{"tools" => []})
+
+      state = %{
+        state
+        | protocol_version: "2025-11-25",
+          transport_state:
+            Map.merge(state.transport_state, %{
+              response_id: "another-request",
+              response_kind: response_kind
+            })
+      }
+
+      assert {:reply, {:error, error}, _state} =
+               RequestHandler.handle_request("tools/list", %{}, {self(), make_ref()}, state)
+
+      assert %ExMCP.Error.TransportError{
+               transport: :http,
+               reason: :response_stream_invalid,
+               details: %{cause: :response_id_mismatch, delivery: :not_retryable}
+             } = error
+    end
   end
 
   test "uses server/discover for modern health checks" do

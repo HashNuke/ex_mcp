@@ -183,7 +183,7 @@ defmodule ExMCP.Client.RequestHandler do
       {:ok, updated_state, response_data} ->
         # Non-SSE HTTP returns response immediately
         case Protocol.parse_message(response_data) do
-          {:result, result, _id} ->
+          {:result, result, ^id} ->
             :telemetry.execute(
               [:ex_mcp, :client, :request, :completed],
               %{},
@@ -192,7 +192,7 @@ defmodule ExMCP.Client.RequestHandler do
 
             {:reply, validate_result(result, updated_state, method), updated_state}
 
-          {:error, error_data, _id} ->
+          {:error, error_data, ^id} ->
             :telemetry.execute(
               [:ex_mcp, :client, :request, :completed],
               %{},
@@ -200,6 +200,10 @@ defmodule ExMCP.Client.RequestHandler do
             )
 
             {:reply, {:error, error_data}, updated_state}
+
+          {response_type, _response_data, _response_id}
+          when response_type in [:result, :error] ->
+            {:reply, {:error, request_stream_error(:response_id_mismatch)}, updated_state}
 
           _ ->
             {:reply, {:error, :invalid_response}, updated_state}
