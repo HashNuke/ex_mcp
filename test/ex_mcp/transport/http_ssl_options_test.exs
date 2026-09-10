@@ -157,6 +157,24 @@ defmodule ExMCP.Transport.HTTPSslOptionsTest do
   end
 
   describe "sanitize_http_request/4" do
+    test "isolates exact-origin credential policy between client states" do
+      alpha = client_state_for_origin("https://alpha.example")
+      beta = client_state_for_origin("https://beta.example")
+      headers = [{"Authorization", "Bearer sentinel"}]
+
+      assert {:ok, ^headers} =
+               HTTP.sanitize_http_request("POST", "https://alpha.example/mcp", headers, alpha)
+
+      assert {:ok, []} =
+               HTTP.sanitize_http_request("POST", "https://beta.example/mcp", headers, alpha)
+
+      assert {:ok, ^headers} =
+               HTTP.sanitize_http_request("POST", "https://beta.example/mcp", headers, beta)
+
+      assert {:ok, []} =
+               HTTP.sanitize_http_request("POST", "https://alpha.example/mcp", headers, beta)
+    end
+
     test "applies the same credential policy to GET and DELETE as POST" do
       previous = Application.get_env(:ex_mcp, :security)
 
@@ -193,5 +211,16 @@ defmodule ExMCP.Transport.HTTPSslOptionsTest do
         assert {"X-Safe", "value"} in sanitized
       end
     end
+  end
+
+  defp client_state_for_origin(origin) do
+    %HTTP{
+      headers: [],
+      security: %{
+        trusted_origins: [origin],
+        trusted_hosts: [],
+        enable_user_consent_validation: false
+      }
+    }
   end
 end
