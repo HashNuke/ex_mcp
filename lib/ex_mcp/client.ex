@@ -37,7 +37,15 @@ defmodule ExMCP.Client do
   use GenServer
   require Logger
 
-  alias ExMCP.Client.{ConnectionManager, EraCache, MRTR, RequestHandler, Subscription}
+  alias ExMCP.Client.{
+    ConnectionManager,
+    EraCache,
+    MRTR,
+    RequestHandler,
+    ResponseBudget,
+    Subscription
+  }
+
   alias ExMCP.Client.Operations.{Prompts, Resources, Tasks, Tools}
 
   alias ExMCP.Internal.{
@@ -70,6 +78,7 @@ defmodule ExMCP.Client do
     :pending_requests,
     :pending_batches,
     :cancelled_requests,
+    :response_budgets,
     :receiver_task,
     :health_check_ref,
     :health_check_interval,
@@ -871,6 +880,7 @@ defmodule ExMCP.Client do
       pending_requests: %{},
       pending_batches: %{},
       cancelled_requests: MapSet.new(),
+      response_budgets: ResponseBudget.new(),
       health_check_interval: Keyword.get(opts, :health_check_interval, 30_000),
       health_check_id: nil,
       connection_status: :connecting,
@@ -1183,6 +1193,7 @@ defmodule ExMCP.Client do
         pending_requests: %{},
         pending_batches: %{},
         cancelled_requests: MapSet.new(),
+        response_budgets: ResponseBudget.new(),
         receiver_task: nil,
         health_check_ref: nil,
         health_check_id: nil,
@@ -1267,13 +1278,25 @@ defmodule ExMCP.Client do
         # Reply with cancelled error and remove from pending
         GenServer.reply(from, {:error, :cancelled})
         new_pending = Map.delete(state.pending_requests, request_id)
-        {:reply, :ok, %{updated_state | pending_requests: new_pending}}
+
+        {:reply, :ok,
+         %{
+           updated_state
+           | pending_requests: new_pending,
+             response_budgets: ResponseBudget.drop(updated_state.response_budgets, request_id)
+         }}
 
       {from, :single} ->
         # Reply with cancelled error and remove from pending
         GenServer.reply(from, {:error, :cancelled})
         new_pending = Map.delete(state.pending_requests, request_id)
-        {:reply, :ok, %{updated_state | pending_requests: new_pending}}
+
+        {:reply, :ok,
+         %{
+           updated_state
+           | pending_requests: new_pending,
+             response_budgets: ResponseBudget.drop(updated_state.response_budgets, request_id)
+         }}
 
       _ ->
         # Other types of requests (batch, etc.) - just track as cancelled
@@ -1295,6 +1318,24 @@ defmodule ExMCP.Client do
   end
 
   @impl GenServer
+  def handle_info({:transport_message, message, response_bytes}, state)
+      when is_integer(response_bytes) and response_bytes >= 0 do
+    case consume_response_budget(state, message, response_bytes) do
+      {:ok, state} ->
+        {:noreply, state} = RequestHandler.parse_transport_message(message, state)
+
+        {:noreply,
+         %{
+           state
+           | response_budgets:
+               ResponseBudget.prune(state.response_budgets, state.pending_requests)
+         }}
+
+      {:error, state} ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:transport_message, message}, state) do
     RequestHandler.parse_transport_message(message, state)
   end
@@ -1415,7 +1456,11 @@ defmodule ExMCP.Client do
   # refresh), which are merged back into our copy of the transport state.
   def handle_info({:async_post_result, result, meta}, state) when is_map(meta) do
     state = merge_async_transport_state(state, meta)
-    handle_async_post_result(result, Map.get(meta, :request_id), state)
+
+    case consume_async_post_budget(state, meta) do
+      {:ok, state} -> handle_async_post_result(result, Map.get(meta, :request_id), state)
+      {:error, state} -> {:noreply, state}
+    end
   end
 
   # Legacy 2-tuple shape (no metadata) kept for compatibility.
@@ -1546,13 +1591,25 @@ defmodule ExMCP.Client do
         GenServer.reply(from, {:error, :timeout})
 
         state = RequestHandler.close_request_stream(request_id, state)
-        {:noreply, %{state | pending_requests: Map.delete(state.pending_requests, request_id)}}
+
+        {:noreply,
+         %{
+           state
+           | pending_requests: Map.delete(state.pending_requests, request_id),
+             response_budgets: ResponseBudget.drop(state.response_budgets, request_id)
+         }}
 
       {from, :single} ->
         GenServer.reply(from, {:error, :timeout})
 
         state = RequestHandler.close_request_stream(request_id, state)
-        {:noreply, %{state | pending_requests: Map.delete(state.pending_requests, request_id)}}
+
+        {:noreply,
+         %{
+           state
+           | pending_requests: Map.delete(state.pending_requests, request_id),
+             response_budgets: ResponseBudget.drop(state.response_budgets, request_id)
+         }}
 
       _ ->
         {:noreply, state}
@@ -1605,6 +1662,56 @@ defmodule ExMCP.Client do
   defp handle_async_post_result({:error, reason}, request_id, state) do
     Logger.error("Async POST failed: #{LogSummary.describe(reason)}")
     {:noreply, fail_async_post_request(state, request_id, reason)}
+  end
+
+  defp consume_response_budget(state, message, response_bytes) do
+    case ResponseBudget.consume(state.response_budgets, message, response_bytes) do
+      {:ok, response_budgets} ->
+        {:ok, %{state | response_budgets: response_budgets}}
+
+      {:error, :uncorrelated, response_budgets} ->
+        state = %{state | response_budgets: response_budgets}
+        {:error, handle_transport_down(:uncorrelated_stream_limit_exceeded, state)}
+
+      {:error, request_ids, response_budgets} when is_list(request_ids) ->
+        state = %{state | response_budgets: response_budgets}
+        {:ok, Enum.reduce(request_ids, state, &fail_oversized_response/2)}
+    end
+  end
+
+  defp consume_async_post_budget(state, meta) do
+    request_id = Map.get(meta, :request_id)
+    response_bytes = Map.get(meta, :response_bytes, 0)
+
+    case ResponseBudget.consume_request(state.response_budgets, request_id, response_bytes) do
+      {:ok, response_budgets} ->
+        {:ok, %{state | response_budgets: response_budgets}}
+
+      {:error, request_ids, response_budgets} ->
+        state = %{state | response_budgets: response_budgets}
+        {:error, Enum.reduce(request_ids, state, &fail_oversized_response/2)}
+    end
+  end
+
+  defp fail_oversized_response(request_id, state) do
+    error = %Error.TransportError{
+      transport: :http,
+      reason: :response_too_large,
+      details: %{delivery: :ambiguous}
+    }
+
+    case Map.get(state.pending_requests, request_id) do
+      {from, :single, _method} ->
+        GenServer.reply(from, {:error, error})
+        %{state | pending_requests: Map.delete(state.pending_requests, request_id)}
+
+      {from, :single} ->
+        GenServer.reply(from, {:error, error})
+        %{state | pending_requests: Map.delete(state.pending_requests, request_id)}
+
+      _not_pending ->
+        state
+    end
   end
 
   # Merge the durable transport-state changes computed by an async POST task
@@ -1661,11 +1768,21 @@ defmodule ExMCP.Client do
     case request_id && Map.get(state.pending_requests, request_id) do
       {from, :single, _method} ->
         GenServer.reply(from, {:error, {:transport_error, reason}})
-        %{state | pending_requests: Map.delete(state.pending_requests, request_id)}
+
+        %{
+          state
+          | pending_requests: Map.delete(state.pending_requests, request_id),
+            response_budgets: ResponseBudget.drop(state.response_budgets, request_id)
+        }
 
       {from, :single} ->
         GenServer.reply(from, {:error, {:transport_error, reason}})
-        %{state | pending_requests: Map.delete(state.pending_requests, request_id)}
+
+        %{
+          state
+          | pending_requests: Map.delete(state.pending_requests, request_id),
+            response_budgets: ResponseBudget.drop(state.response_budgets, request_id)
+        }
 
       _ ->
         state
@@ -1714,6 +1831,7 @@ defmodule ExMCP.Client do
         pending_requests: %{},
         pending_batches: %{},
         cancelled_requests: MapSet.new(),
+        response_budgets: ResponseBudget.new(),
         health_check_ref: nil,
         health_check_id: nil,
         async_post_tasks: %{},

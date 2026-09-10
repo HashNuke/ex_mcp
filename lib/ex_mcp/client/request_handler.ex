@@ -7,13 +7,15 @@ defmodule ExMCP.Client.RequestHandler do
   """
 
   require Logger
-  alias ExMCP.Client.{InputDispatcher, MRTR}
+  alias ExMCP.Client.{InputDispatcher, MRTR, ResponseBudget}
   alias ExMCP.Error
   alias ExMCP.Internal.{JSONRPC, LogSummary, Maps, Protocol, RequestParams, VersionRegistry}
   alias ExMCP.Protocol.{ErrorCodes, ResponseBuilder, ResultEnvelope}
   alias ExMCP.Tasks.Extension, as: TasksExtension
   alias ExMCP.Transport.HTTP
+  alias ExMCP.Transport.HTTP.LegacySSE
   alias ExMCP.Transport.HTTP.ToolHeaders
+  alias ExMCP.Transport.ReliabilityWrapper
 
   # Extra time allowed past a caller-enforced timeout before the client
   # cleans up its own pending-request bookkeeping.
@@ -209,7 +211,15 @@ defmodule ExMCP.Client.RequestHandler do
         # SSE and streaming transports - track pending request
         maybe_schedule_request_timeout(id, meta, updated_state)
         pending_requests = Map.put(updated_state.pending_requests, id, {from, :single, method})
-        new_state = %{updated_state | pending_requests: pending_requests}
+
+        response_budgets =
+          track_response_budget(updated_state.response_budgets, request, id, updated_state)
+
+        new_state =
+          updated_state
+          |> Map.put(:pending_requests, pending_requests)
+          |> Map.put(:response_budgets, response_budgets)
+
         {:noreply, new_state}
 
       {:error, :not_connected} ->
@@ -244,6 +254,49 @@ defmodule ExMCP.Client.RequestHandler do
   end
 
   defp send_request_message(request, state), do: send_message(request, state)
+
+  defp track_response_budget(
+         budgets,
+         request,
+         request_id,
+         %{
+           transport_mod: HTTP,
+           transport_state: %HTTP{protocol_era: :legacy, max_response_bytes: limit}
+         }
+       ) do
+    ResponseBudget.track(budgets, request_id, request, limit)
+  end
+
+  defp track_response_budget(
+         budgets,
+         request,
+         request_id,
+         %{transport_mod: LegacySSE, transport_state: %LegacySSE{max_response_bytes: limit}}
+       ) do
+    ResponseBudget.track(budgets, request_id, request, limit)
+  end
+
+  defp track_response_budget(
+         budgets,
+         request,
+         request_id,
+         %{transport_mod: ReliabilityWrapper, transport_state: transport_state} = state
+       ) do
+    case ReliabilityWrapper.unwrap(transport_state) do
+      {transport_mod, unwrapped_state} ->
+        track_response_budget(
+          budgets,
+          request,
+          request_id,
+          %{state | transport_mod: transport_mod, transport_state: unwrapped_state}
+        )
+
+      _not_wrapped ->
+        budgets
+    end
+  end
+
+  defp track_response_budget(budgets, _request, _request_id, _state), do: budgets
 
   defp open_request_stream(request, state, transport_state) do
     with {:ok, encoded} <- encode_for_transport(HTTP, request),

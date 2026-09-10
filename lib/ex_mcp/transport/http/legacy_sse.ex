@@ -35,6 +35,7 @@ defmodule ExMCP.Transport.HTTP.LegacySSE do
   alias ExMCP.Internal.{DNSResolver, LogSummary, Options}
   alias ExMCP.Transport.HTTP.{BoundedClient, TargetPolicy}
   alias ExMCP.Transport.SSEClient
+  alias ExMCP.Transport.StreamMessage
 
   defstruct [
     :base_url,
@@ -330,7 +331,8 @@ defmodule ExMCP.Transport.HTTP.LegacySSE do
         do_receive(state, deadline)
 
       {:ok, message} ->
-        {:ok, message, state}
+        stream_message = %StreamMessage{payload: message, response_bytes: byte_size(data)}
+        {:ok, stream_message, state}
 
       {:error, reason} ->
         {:error, {:json_decode_error, reason}}

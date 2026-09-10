@@ -87,7 +87,7 @@ defmodule ExMCP.Transport.HTTP do
   alias ExMCP.Authorization.{FullOAuthFlow, LogSanitizer}
   alias ExMCP.Internal.{DNSResolver, Headers, LogSummary, Options, Security, SecurityConfig, SSE}
   alias ExMCP.Protocol.VersionNegotiator
-  alias ExMCP.Transport.{SecurityGuard, SSEClient}
+  alias ExMCP.Transport.{SecurityGuard, SSEClient, StreamMessage}
 
   alias ExMCP.Transport.HTTP.{
     BoundedClient,
@@ -367,17 +367,28 @@ defmodule ExMCP.Transport.HTTP do
     # exit-trapping client's {:EXIT, ...} transport handling is untouched.
     {_task_pid, task_ref} =
       spawn_monitor(fn ->
-        result =
+        {result, response_bytes} =
           case perform_and_maybe_auth(message, state) do
-            {:ok, response} -> handle_http_response(response, state, message)
-            {:ok, response, new_state} -> handle_http_response(response, new_state, message)
-            {:error, reason} -> {:error, reason}
+            {:ok, response} ->
+              {handle_http_response(response, state, message), response_payload_bytes(response)}
+
+            {:ok, response, new_state} ->
+              {handle_http_response(response, new_state, message),
+               response_payload_bytes(response)}
+
+            {:error, reason} ->
+              {{:error, reason}, 0}
           end
 
         # Report the durable transport-state fields this POST changed
         # (session rotation, OAuth token refresh) so the client can merge
         # them into its copy of the transport state instead of discarding.
-        meta = %{request_id: request_id, state_changes: result_state_changes(state, result)}
+        meta = %{
+          request_id: request_id,
+          response_bytes: response_bytes,
+          state_changes: result_state_changes(state, result)
+        }
+
         send(parent, {:async_post_result, result, meta})
       end)
 
@@ -769,6 +780,24 @@ defmodule ExMCP.Transport.HTTP do
 
   defp extract_request_id(_message), do: nil
 
+  defp response_payload_bytes({_status_line, headers, body}) do
+    body = if is_list(body), do: List.to_string(body), else: body
+    content_type = Headers.get(headers, "content-type") || ""
+
+    if String.contains?(content_type, "text/event-stream") do
+      body
+      |> SSE.parse_complete()
+      |> Enum.reduce(0, fn event, total ->
+        case event[:data] do
+          data when is_binary(data) -> total + byte_size(data)
+          _no_data -> total
+        end
+      end)
+    else
+      byte_size(body)
+    end
+  end
+
   # Transport-state fields an async POST may durably change. Everything else
   # is either transient (:last_response) or owned by the connection lifecycle
   # (:sse_pid, :sse_deferred_attempted) and must never be reported back.
@@ -1005,7 +1034,8 @@ defmodule ExMCP.Transport.HTTP do
             receive_message(new_state)
 
           {:ok, message} ->
-            {:ok, message, new_state}
+            stream_message = %StreamMessage{payload: message, response_bytes: byte_size(data)}
+            {:ok, stream_message, new_state}
 
           {:error, reason} ->
             {:error, {:json_decode_error, reason}}
